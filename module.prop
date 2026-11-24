@@ -1,0 +1,6 @@
+id=pixel_skt_mt_fix
+name=Pixel SKT incoming-call fix
+version=v0.1.0
+versionCode=1
+author=kyujin
+description=Patches com.android.imsstack in memory so incoming VoLTE calls ring with a plain 180 and answer in the 200 OK (SKT drops calls whose 200 OK has no SDP). No system files are changed.
