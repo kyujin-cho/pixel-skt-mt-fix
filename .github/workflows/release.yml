@@ -1,0 +1,88 @@
+name: Build and release module
+
+# Builds bin/imspatch with the NDK and packs the KernelSU module ZIP.
+# - Every run uploads the ZIP as a workflow artifact.
+# - Pushing a tag like v0.2.0 also publishes a GitHub Release with the ZIP attached.
+#   The tag must match `version=` in module.prop.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read module version
+        id: meta
+        run: |
+          version=$(sed -n 's/^version=//p' module.prop)
+          [ -n "$version" ] || { echo "::error::version= missing in module.prop"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check tag matches module.prop
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          if [ "${GITHUB_REF_NAME}" != "${{ steps.meta.outputs.version }}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match module.prop version ${{ steps.meta.outputs.version }}"
+            exit 1
+          fi
+
+      - name: Set up Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28c
+          add-to-path: false
+
+      - name: Build helper and module ZIP
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: ./build.sh
+
+      - name: Check the build output
+        run: |
+          zip=pixel_skt_mt_fix-${{ steps.meta.outputs.version }}.zip
+          file bin/imspatch | grep -q 'ARM aarch64.*statically linked' \
+            || { echo "::error::bin/imspatch is not a static arm64 binary"; exit 1; }
+          for f in module.prop customize.sh common.sh service.sh action.sh uninstall.sh bin/imspatch; do
+            unzip -l "$zip" "$f" > /dev/null || { echo "::error::$f missing from $zip"; exit 1; }
+          done
+          sha256sum "$zip" | tee "$zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pixel_skt_mt_fix-${{ steps.meta.outputs.version }}
+          path: |
+            pixel_skt_mt_fix-${{ steps.meta.outputs.version }}.zip
+            pixel_skt_mt_fix-${{ steps.meta.outputs.version }}.zip.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pixel_skt_mt_fix-${{ needs.build.outputs.version }}
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            pixel_skt_mt_fix-${{ needs.build.outputs.version }}.zip
+            pixel_skt_mt_fix-${{ needs.build.outputs.version }}.zip.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true
