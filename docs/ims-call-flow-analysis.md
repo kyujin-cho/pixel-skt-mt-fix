@@ -289,8 +289,21 @@ Scope and safety:
 - **Only this call site changes.** `IsAvailableOnBoth` itself is untouched, so other uses of 100rel (for example PRACK handling on outgoing calls) behave as before.
 - **It applies to every SIM.** The stack serves all subscriptions from one process, so incoming calls on other carriers also switch to "180, then answer in the 200 OK". That is ordinary SIP behaviour, but it has not been tested on every carrier.
 - **Nothing on disk changes.** A watcher started by KernelSU writes the patch through `/proc/<pid>/mem` and re-applies it whenever the IMS process restarts.
-- **It is gated on the exact build.** The library's SHA-256 must match the known build, and the eight bytes at the site (`99 9b 06 94 20 07 00 36`) must match before writing. After a system update the module logs that the hash differs and does nothing.
+- **The site is found, not hard-coded** (since v0.2.0). The `bin/imspatch` helper (`src/imspatch.c`):
+  - opens the mapped `libimsstack.so` through `/proc/<pid>/root`;
+  - looks up `IdleState::OnAttached`, `MtcExtensionSet::IsAvailableOnBoth` and `MtcExtensionSet::OPTION_TAG_RPR` in its dynamic symbol table;
+  - scans the function's code in the file for `bl` followed by `tbz w0, #0, <target>`.
+
+  Before writing anything it checks, in the live process, that:
+  - the `bl` reaches `IsAvailableOnBoth`, directly or through a PLT stub whose GOT slot holds that function's runtime address;
+  - within the four instructions before the `bl`, an `adrp`/`ldr x1` pair loads a GOT slot holding the runtime address of `OPTION_TAG_RPR`;
+  - exactly one site matches;
+  - the word in memory is either the original `tbz` from the file or the patched `b`.
+
+  Any mismatch means nothing is written. This lets the module survive firmware updates as long as Google keeps these symbols exported and the function's shape intact. The first version (v0.1.0) was pinned to the library's SHA-256 and a fixed offset.
 - **It is reversible at runtime.** The KernelSU **Action** button toggles the patch on the running process, and uninstalling the module writes the original instruction back.
+
+An alternative that rewrites the incoming INVITE instead of patching the stack is recorded as an open design in [design-sip-rewrite.md](design-sip-rewrite.md).
 
 The proper fix belongs in Google's IMS stack. Either don't use a reliable 183 for the answer when the remote only *supports* 100rel (as Samsung does by default), or repeat the SDP answer in the 200 OK, at least for SKT.
 
@@ -317,5 +330,6 @@ These don't cause the drop, but they are wrong in the Pixel's SKT profile:
 
 - **SKT's side is inferred.** Why SKT's call server rejects a 200 OK without SDP is inferred from its behaviour. Its implementation was not visible.
 - **Samsung's profile getters were not inspected.** They live in the Samsung framework outside `imsservice.apk`; they were assumed to be plain JSON reads with the schema defaults.
-- **One build only.** The Pixel analysis applies to the single `libimsstack.so` build named above. Addresses will differ in other builds.
+- **One build analysed.** The Pixel analysis was done on the single `libimsstack.so` build named above. Addresses will differ in other builds. The module locates the site by symbol and pattern, but it has only been run against this build.
+- **Other Pixel models.** The fix only applies to phones whose IMS stack is `com.android.imsstack` with `libimsstack.so`. Other Pixel generations may ship a different IMS stack, which would need its own analysis.
 - **Narrow testing.** The patched flow was verified with incoming calls on SKT from one caller (an iPhone on SKT). Incoming calls on other carriers in the same phone, and callers from other Korean networks, were not tested.
